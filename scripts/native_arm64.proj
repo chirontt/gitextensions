@@ -1,0 +1,63 @@
+<Project DefaultTargets="Build">
+  <PropertyGroup>
+    <!-- Keep Sdk.targets happy -->
+    <TargetFrameworkIdentifier>net</TargetFrameworkIdentifier>
+    <TargetFrameworkVersion>6.0</TargetFrameworkVersion>
+    <UseCompatibilityPackage>true</UseCompatibilityPackage>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="vswhere" IsImplicitlyDefined="true" GeneratePathProperty="true" />
+  </ItemGroup>
+
+  <Import Project="Sdk.targets" Sdk="Microsoft.NET.Sdk" />
+
+  <Target Name="Build">
+    <PropertyGroup>
+      <Configuration Condition="'$(Configuration)' == ''">Debug</Configuration>
+      <VSWherePath>$([MSBuild]::NormalizePath('$(Pkgvswhere)', 'tools'))</VSWherePath>
+    </PropertyGroup>
+
+    <!-- Work out VS installation path, so we can find MSBuild.exe -->
+    <Exec
+        Command="vswhere.exe -latest -prerelease -property installationPath -requires Microsoft.Component.MSBuild"
+        WorkingDirectory="$(VSWherePath)"
+        EchoOff="true"
+        ConsoleToMsBuild="true"
+        StandardOutputImportance="Low">
+        <Output TaskParameter="ConsoleOutput" PropertyName="_VSInstallPath" />
+    </Exec>
+
+    <PropertyGroup>
+      <_ArtifactsLogDir>$([MSBuild]::NormalizePath('$(ArtifactsLogDir)', '..', '..', 'log'))</_ArtifactsLogDir>
+      <_OutputPath>$([System.IO.Path]::GetFullPath('$(ArtifactsBinDir)\'))</_OutputPath>
+
+      <_MSBuildCurrentPath>$([MSBuild]::NormalizePath('$(_VSInstallPath)', 'MSBuild', 'Current', 'Bin'))</_MSBuildCurrentPath>
+
+      <_GitExtSshAskPassPath>$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '..', 'GitExtSshAskPass', 'GitExtSshAskPass.sln'))</_GitExtSshAskPassPath>
+      <_GitExtensionsShellExPath>$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '..', 'GitExtensionsShellEx', 'GitExtensionsShellEx.sln'))</_GitExtensionsShellExPath>
+
+      <_ProjectArgsARM64> /p:Configuration=$(Configuration) /p:Platform=ARM64</_ProjectArgsARM64>
+    </PropertyGroup>
+
+    <!-- Build GitExtSshAskPass project, ARM64 -->
+    <Exec
+        Command="msbuild.exe $(_GitExtSshAskPassPath) $(_ProjectArgsARM64) /p:OutDir=$(_OutputPath)GitExtSshAskPass\ /bl:$(_ArtifactsLogDir)\GitExtSshAskPass.binlog"
+        WorkingDirectory="$(_MSBuildCurrentPath)"
+        EchoOff="true"
+        ConsoleToMsBuild="true"
+        StandardOutputImportance="High">
+    </Exec>
+    <!-- Build GitExtensionsShellEx project, ARM64 -->
+    <Exec
+        Command="msbuild.exe $(_GitExtensionsShellExPath) $(_ProjectArgsARM64) /p:OutDir=$(_OutputPath)GitExtensionsShellEx\ /bl:$(_ArtifactsLogDir)\GitExtensionsShellEx64.binlog"
+        WorkingDirectory="$(_MSBuildCurrentPath)"
+        EchoOff="true"
+        ConsoleToMsBuild="true"
+        StandardOutputImportance="High">
+    </Exec>
+  </Target>
+
+  <!-- Stub out targets required by the Microsoft.NET.Sdk -->
+  <Target Name="CreateManifestResourceNames"></Target>
+</Project>
