@@ -1,0 +1,73 @@
+name: Arm64 GitExtensions Build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build and Test (${{ matrix.os }}, .NET ${{ matrix.dotnet-version }})
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ windows-11-arm ]
+        dotnet-version: [ 9.0.x ]
+        ge-version: [ 6.0.2 ]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          ref: "v${{ matrix.ge-version }}-arm64"  # use version tag to check out
+
+      - name: Checkout submodules
+        run: git submodule update --init --recursive
+
+      - name: Use Python 3.13
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Setup .NET ${{ matrix.dotnet-version }}
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ matrix.dotnet-version }}
+
+      - name: Set up a Developer Command Prompt for Microsoft Visual C++
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install WiX
+        run: dotnet tool install --global wix
+
+      - name: Restore dependencies
+        run: dotnet restore
+
+      - name: Build
+        if: github.event_name != 'pull_request'
+        run: |
+          $shortSha = $(git rev-parse --short HEAD)
+          $longSha = $(git rev-parse HEAD)
+          $buildArgs = '/p:ContinuousIntegrationBuild=true /p:TargetPlatform=arm64'
+          $buildArgs += " /p:GitCommit=$shortSha /p:GitSha=$longSha"
+          echo "buildArgs = $buildArgs"
+          cd eng
+          python set_version_to.py -v ${{ matrix.ge-version }} -t ${{ matrix.ge-version }}-arm64
+          cd ..
+          dotnet build .\src\native\build.proj -c Release --no-restore --verbosity q --nologo /p:TargetPlatform=arm64
+          dotnet build -c Release --no-restore --verbosity q --nologo $buildArgs
+          dotnet publish -c Release --no-build $buildArgs
+
+      - name: Upload GE distribution files
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: GE-v${{ matrix.ge-version }}-arm64
+          path: |
+            artifacts/Release/publish/*.msi
+            artifacts/Release/publish/*.zip
+
+      - name: Test
+        run: dotnet test -c Release --no-restore --no-build --verbosity normal
+
