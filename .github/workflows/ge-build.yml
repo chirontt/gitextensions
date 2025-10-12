@@ -1,0 +1,149 @@
+name: GitExtensions Build (x64, arm64)
+
+on:
+  pull_request:
+    branches: [ master ]
+  push:
+    branches: [ master ]
+  # Manually triggered via the Actions UI, with inputs
+  workflow_dispatch:
+    inputs:
+      ge-release-version:
+        description: "GE release version"
+        required: true
+        type: string
+        default: '33.33.33' # for dev
+      run-x64-tests:
+        description: "Run tests for x64 build"
+        type: boolean
+        default: true
+      run-arm64-tests:
+        description: "Run tests for arm64 build"
+        type: boolean
+        default: false # skip arm64 test by default, as it doesn't complete, resulting in timeout...
+
+env:
+  # version is '33.33.33' for PR/push, or take it from user's input when manually triggered,
+  # then append the current run number
+  ge_version: ${{ github.event_name == 'workflow_dispatch' && inputs.ge-release-version || '33.33.33' }}.${{ github.run_number }}
+  build_config: Release
+
+jobs:
+  build-and-test:
+    name: Build and Test (${{ matrix.os }})
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ windows-latest, windows-11-arm ]
+
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Checkout submodules
+        run: git submodule update --init --recursive
+
+      - name: Use Python 3.13
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+
+      - name: Install WiX
+        run: dotnet tool install --global wix
+
+      - name: Set up common build arguments
+        run: |
+          $platformArch = '${{ runner.arch }}'.ToLower()
+          echo "platformArch=$platformArch" >> $env:GITHUB_ENV
+          $buildArtifactsDir = "artifacts/$platformArch/$env:build_config"
+          echo "buildArtifactsDir=$buildArtifactsDir" >> $env:GITHUB_ENV
+          $buildArgs = "/p:ContinuousIntegrationBuild=true"
+          echo "buildArgs=$buildArgs" >> $env:GITHUB_ENV
+          echo "geVersionText=${{ env.ge_version }}" >> $env:GITHUB_ENV
+
+      - name: Set up extra build arguments for PR
+        if: github.event_name == 'pull_request'
+        run: |
+          $shortSha = $(git rev-parse --short ${{ github.event.pull_request.head.sha }})
+          $buildArgs = "$env:buildArgs /p:GitCommit=$shortSha /p:GitSha=${{ github.event.pull_request.head.sha }}"
+          echo "buildArgs=$buildArgs" >> $env:GITHUB_ENV
+
+      - name: Set up extra build arguments for Arm64
+        if: runner.arch == 'arm64'
+        run: |
+          $geVersionText = "${env:geVersionText}-arm64"
+          echo "geVersionText=$geVersionText" >> $env:GITHUB_ENV
+          echo "TargetPlatform=arm64" >> $env:GITHUB_ENV
+
+      - name: Set up GE version
+        run: |
+          cd eng
+          python set_version_to.py -v ${{ env.ge_version }} -t $env:geVersionText
+          cd ..
+
+      - name: Build GE native components
+        run: |
+          dotnet build .\src\native\build.proj -c $env:build_config --verbosity q
+
+      - name: Build GE app
+        run: |
+          dotnet build -c $env:build_config --verbosity q ${{ env.buildArgs }}
+          # We are done with the build, reset all pending changes
+          git reset --hard HEAD
+
+      - name: Verify localisation of new strings
+        run: |
+          # Verify that new strings (if any) have been processed and ready for localisation
+          Push-Location .\src\app\GitExtensions
+          dotnet msbuild /p:Configuration=$env:build_config /t:_UpdateEnglishTranslations /p:RunTranslationApp=true ${{ env.buildArgs }} /v:m
+          Pop-Location
+
+      - name: Package GE app for deployment
+        run: |
+          dotnet publish -c $env:build_config --no-build ${{ env.buildArgs }}
+
+      - name: Upload GE distribution files
+        #if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v6
+        with:
+          name: GE-v${{ env.ge_version }}-${{ runner.arch }}-dist
+          path: |
+            ${{ env.buildArtifactsDir }}/publish/*.msi
+            ${{ env.buildArtifactsDir }}/publish/*.zip
+          retention-days: 7
+
+      - name: Test - for PR/push
+        id: pr_push_test
+        if: github.event_name != 'workflow_dispatch'
+        run: dotnet test -c $env:build_config --no-restore --no-build $env:buildArgs --verbosity m --test-adapter-path:. --logger:trx /bl:.\artifacts\${env:platformArch}\log\tests.binlog
+
+      - name: Test - when manually triggered
+        id: dispatched_test
+        if: github.event_name == 'workflow_dispatch' && ((runner.arch == 'arm64' && inputs.run-arm64-tests) || (runner.arch == 'x64' && inputs.run-x64-tests))
+        run: dotnet test -c $env:build_config --no-restore --no-build $env:buildArgs --verbosity m --test-adapter-path:. --logger:trx /bl:.\artifacts\${env:platformArch}\log\tests.binlog
+
+      - name: Upload test logs if test failure
+        if: always() && (contains(fromJSON('["cancelled", "failure"]'), steps.pr_push_test.conclusion) || contains(fromJSON('["cancelled", "failure"]'), steps.dispatched_test.conclusion))
+        uses: actions/upload-artifact@v6
+        with:
+          name: FailedTestLogs-v${{ env.ge_version }}-${{ runner.arch }}
+          path: |
+            artifacts/${{ env.platformArch }}/log/tests.binlog
+            ${{ env.buildArtifactsDir }}/TestsResults/*.trx
+          retention-days: 7
+
+      - name: Publish Test Results
+        if: failure() || success() || cancelled()
+        uses: EnricoMi/publish-unit-test-result-action/windows@v2
+        with:
+          files: "artifacts/${{ env.platformArch }}/**/*.trx"
+
